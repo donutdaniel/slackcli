@@ -1,0 +1,36 @@
+{
+  "cases": [
+    {
+      "case": "send-message-channel",
+      "cli_median_of_medians_ms": 260.1,
+      "cli_session_medians_ms": [
+        262.1,
+        258.0
+      ],
+      "mcp_median_of_medians_ms": 4250.3,
+      "mcp_session_medians_ms": [
+        4253.7,
+        4246.8
+      ],
+      "ratio_text": "CLI 16.34x faster"
+    },
+    {
+      "case": "send-message-thread",
+      "cli_median_of_medians_ms": 277.1,
+      "cli_session_medians_ms": [
+        292.6,
+        261.7
+      ],
+      "mcp_median_of_medians_ms": 4409.9,
+      "mcp_session_medians_ms": [
+        4585.8,
+        4234.0
+      ],
+      "ratio_text": "CLI 15.91x faster"
+    }
+  ],
+  "runs_per_case": 10,
+  "sessions": 2,
+  "suite": "write",
+  "warmup_per_case": 2
+}

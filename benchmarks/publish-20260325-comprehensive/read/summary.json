@@ -1,0 +1,64 @@
+{
+  "cases": [
+    {
+      "case": "read-channel-page1",
+      "cli_median_of_medians_ms": 201.8,
+      "cli_session_medians_ms": [
+        204.9,
+        198.7
+      ],
+      "mcp_median_of_medians_ms": 4174.9,
+      "mcp_session_medians_ms": [
+        4151.1,
+        4198.8
+      ],
+      "ratio_text": "CLI 20.69x faster"
+    },
+    {
+      "case": "read-current-user-profile",
+      "cli_median_of_medians_ms": 175.2,
+      "cli_session_medians_ms": [
+        177.5,
+        172.9
+      ],
+      "mcp_median_of_medians_ms": 580.8,
+      "mcp_session_medians_ms": [
+        579.0,
+        582.6
+      ],
+      "ratio_text": "CLI 3.32x faster"
+    },
+    {
+      "case": "read-thread-page1",
+      "cli_median_of_medians_ms": 199.2,
+      "cli_session_medians_ms": [
+        205.6,
+        192.8
+      ],
+      "mcp_median_of_medians_ms": 6729.0,
+      "mcp_session_medians_ms": [
+        5997.1,
+        7460.9
+      ],
+      "ratio_text": "CLI 33.78x faster"
+    },
+    {
+      "case": "search-messages-page1",
+      "cli_median_of_medians_ms": 378.9,
+      "cli_session_medians_ms": [
+        403.2,
+        354.5
+      ],
+      "mcp_median_of_medians_ms": 7785.2,
+      "mcp_session_medians_ms": [
+        7864.1,
+        7706.2
+      ],
+      "ratio_text": "CLI 20.55x faster"
+    }
+  ],
+  "runs_per_case": 20,
+  "sessions": 2,
+  "suite": "read",
+  "warmup_per_case": 3
+}

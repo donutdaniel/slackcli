@@ -1,0 +1,14 @@
+target/
+tmp/
+benchmarks/latest/
+__pycache__/
+*.pyc
+*.pyo
+
+.DS_Store
+.vscode/
+.idea/
+
+*.log
+.env
+.env.*

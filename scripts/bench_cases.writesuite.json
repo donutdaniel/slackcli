@@ -1,0 +1,27 @@
+{
+  "cases": [
+    {
+      "name": "send-message-channel",
+      "cli": ["message", "send", "$SLACK_FIXTURE_CHANNEL_ID", "--text", "slackcli bench write $BENCH_NONCE"],
+      "mcp": {
+        "alias": "send_message",
+        "arguments": {
+          "channel_id": "$SLACK_FIXTURE_CHANNEL_ID",
+          "text": "slackcli bench write $BENCH_NONCE"
+        }
+      }
+    },
+    {
+      "name": "send-message-thread",
+      "cli": ["message", "send", "$SLACK_FIXTURE_CHANNEL_ID", "--text", "slackcli bench thread $BENCH_NONCE", "--thread-ts", "$SLACK_FIXTURE_ROOT_TS"],
+      "mcp": {
+        "alias": "send_message",
+        "arguments": {
+          "channel_id": "$SLACK_FIXTURE_CHANNEL_ID",
+          "text": "slackcli bench thread $BENCH_NONCE",
+          "thread_ts": "$SLACK_FIXTURE_ROOT_TS"
+        }
+      }
+    }
+  ]
+}

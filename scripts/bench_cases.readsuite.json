@@ -1,0 +1,48 @@
+{
+  "cases": [
+    {
+      "name": "read-current-user-profile",
+      "cli": ["user", "get", "$SLACK_FIXTURE_SELF_USER_ID"],
+      "mcp": {
+        "alias": "read_user_profile",
+        "arguments": {
+          "user_id": "$SLACK_FIXTURE_SELF_USER_ID"
+        }
+      }
+    },
+    {
+      "name": "read-channel-page1",
+      "cli": ["conversation", "history", "$SLACK_FIXTURE_CHANNEL_ID", "--limit", "1"],
+      "mcp": {
+        "alias": "read_channel",
+        "arguments": {
+          "channel_id": "$SLACK_FIXTURE_CHANNEL_ID",
+          "limit": 1
+        }
+      }
+    },
+    {
+      "name": "read-thread-page1",
+      "cli": ["conversation", "replies", "$SLACK_FIXTURE_CHANNEL_ID", "$SLACK_FIXTURE_ROOT_TS", "--limit", "1"],
+      "mcp": {
+        "alias": "read_thread",
+        "arguments": {
+          "channel_id": "$SLACK_FIXTURE_CHANNEL_ID",
+          "thread_ts": "$SLACK_FIXTURE_ROOT_TS",
+          "limit": 1
+        }
+      }
+    },
+    {
+      "name": "search-messages-page1",
+      "cli": ["search", "messages", "$SLACK_FIXTURE_SEARCH_QUERY", "--count", "1"],
+      "mcp": {
+        "alias": "search_messages",
+        "arguments": {
+          "query": "$SLACK_FIXTURE_SEARCH_QUERY",
+          "limit": 1
+        }
+      }
+    }
+  ]
+}

@@ -128,7 +128,7 @@ async fn send_ack(websocket: &mut SocketStream, envelope_id: &str) -> Result<()>
     let ack = json!({ "envelope_id": envelope_id });
     let ack = serde_json::to_string(&ack).context("failed to serialize Socket Mode ack")?;
     websocket
-        .send(Message::Text(ack.into()))
+        .send(Message::Text(ack))
         .await
         .context("failed to acknowledge Slack Socket Mode envelope")?;
     Ok(())

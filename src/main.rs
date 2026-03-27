@@ -2,12 +2,14 @@ mod config;
 mod output;
 mod resolve;
 mod slack;
+mod socket_mode;
 
 use std::ffi::OsString;
 use std::fs;
-use std::io::{self, Read};
+use std::io::{self, IsTerminal, Read};
 use std::path::{Path, PathBuf};
 use std::process;
+use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow, bail};
 use clap::{Args, Parser, Subcommand, ValueEnum, error::ErrorKind};
@@ -17,12 +19,14 @@ use serde_json::{Value, json};
 use tracing_subscriber::EnvFilter;
 
 use crate::config::{
-    AuthType, ConfigStore, ProfileMeta, RuntimeSession, StoredSecret, read_text_file,
+    AuthType, ConfigStore, ProfileMeta, RuntimeAppSession, RuntimeSession, SLACK_APP_TOKEN_ENV,
+    SLACKCLI_APP_TOKEN_ENV, SessionSource, StoredAppSecret, StoredSecret, read_text_file,
     slugify_profile_name,
 };
 use crate::output::OutputFormat;
 use crate::resolve::SlackResolver;
 use crate::slack::{SlackApiError, SlackAuthTest, SlackClient, merge_object_body};
+use crate::socket_mode::ListenOptions;
 
 #[derive(Parser)]
 #[command(
@@ -75,6 +79,8 @@ enum Commands {
     Search(SearchArgs),
     #[command(about = "Post, update, delete, and permalink messages")]
     Message(MessageArgs),
+    #[command(about = "Listen for Slack events over Socket Mode")]
+    Listen(ListenArgs),
     #[command(about = "Call any Slack Web API method directly")]
     Api(ApiArgs),
 }
@@ -89,6 +95,8 @@ struct AuthArgs {
 #[derive(Subcommand)]
 enum AuthCommand {
     Login(AuthLoginArgs),
+    #[command(about = "Validate and store an app-level xapp token for Socket Mode")]
+    AppLogin(AuthAppLoginArgs),
     #[command(about = "List saved profiles and show which one is active")]
     List,
     #[command(about = "Check token reachability and current auth metadata")]
@@ -102,13 +110,30 @@ enum AuthCommand {
 #[derive(Args)]
 #[command(
     about = "Validate and store a Slack token",
-    long_about = "Validate and store a Slack token.\n\nIf `--token` is omitted, the command prompts once with hidden input, validates the token with `auth.test`, stores it in the local credentials file, and marks the resulting profile as active. Prefer the hidden prompt for interactive use because shell history and process lists can expose command-line arguments. Set `SLACK_TOKEN` for one-shot use without saving."
+    long_about = "Validate and store a Slack token.\n\nIf `--token` is omitted, the command prompts once with hidden input, validates the token with `auth.test`, stores it in the local credentials file, and marks the resulting profile as active. In interactive use, the command also prompts for the Socket Mode app token unless `--app-token` or `SLACK_APP_TOKEN` is already set. Prefer the hidden prompt for interactive use because shell history and process lists can expose command-line arguments. Set `SLACK_TOKEN` for one-shot use without saving."
 )]
 struct AuthLoginArgs {
     /// Optional profile name to store. If omitted, the CLI derives one automatically.
     #[arg(long)]
     profile_name: Option<String>,
     /// Slack token for automation-only flows. Prefer the hidden prompt for interactive use.
+    #[arg(long)]
+    token: Option<String>,
+    /// Optional app-level xapp token to store for Socket Mode.
+    #[arg(long)]
+    app_token: Option<String>,
+}
+
+#[derive(Args)]
+#[command(
+    about = "Validate and store an app-level xapp token for Socket Mode",
+    long_about = "Validate and store an app-level xapp token for Socket Mode.\n\nIf `--token` is omitted, the command prompts once with hidden input, validates the token with `apps.connections.open`, and stores it against an existing saved profile. Use this when `slackcli listen` should work without exporting `SLACK_APP_TOKEN` every time."
+)]
+struct AuthAppLoginArgs {
+    /// Existing profile name to attach the app token to. Defaults to the active profile.
+    #[arg(long)]
+    profile_name: Option<String>,
+    /// App-level token for automation-only flows. Prefer the hidden prompt for interactive use.
     #[arg(long)]
     token: Option<String>,
 }
@@ -621,6 +646,23 @@ struct MessagePermalinkArgs {
 }
 
 #[derive(Args)]
+#[command(
+    about = "Listen for Slack events over Socket Mode",
+    after_help = "Examples:\n  slackcli listen\n  slackcli --profile work listen\n  slackcli listen --app-token \"$SLACK_APP_TOKEN\" --output json\n  slackcli listen --debug-reconnects"
+)]
+struct ListenArgs {
+    /// App-level xapp token. Defaults to SLACK_APP_TOKEN or the saved token for the selected profile.
+    #[arg(long)]
+    app_token: Option<String>,
+    /// Ask Slack to shorten the connection lifetime for reconnect testing.
+    #[arg(long)]
+    debug_reconnects: bool,
+    /// Delay between reconnect attempts after a socket refresh or disconnect.
+    #[arg(long, default_value_t = 1)]
+    reconnect_delay_secs: u64,
+}
+
+#[derive(Args)]
 #[command(about = "Call Slack API methods directly")]
 struct ApiArgs {
     #[command(subcommand)]
@@ -783,6 +825,7 @@ async fn run(cli: Cli) -> Result<()> {
         Commands::Resolve(args) => handle_resolve(args, &globals, &client, &mut store).await,
         Commands::Search(args) => handle_search(args, &globals, &client, &mut store).await,
         Commands::Message(args) => handle_message(args, &globals, &client, &mut store).await,
+        Commands::Listen(args) => handle_listen(args, &globals, &client, &store).await,
         Commands::Api(args) => handle_api(args, &globals, &client, &mut store).await,
     }
 }
@@ -809,6 +852,7 @@ async fn handle_auth(
 ) -> Result<()> {
     match args.command {
         AuthCommand::Login(args) => handle_auth_login(args, globals, client, store).await,
+        AuthCommand::AppLogin(args) => handle_auth_app_login(args, globals, client, store).await,
         AuthCommand::List => {
             let profiles = store
                 .profiles()
@@ -818,6 +862,7 @@ async fn handle_auth(
                         "name": name,
                         "is_active": store.active_profile() == Some(name.as_str()),
                         "has_secret": store.has_persisted_secret(name),
+                        "has_app_token": store.has_persisted_app_secret(name),
                         "meta": meta,
                     })
                 })
@@ -836,6 +881,7 @@ async fn handle_auth(
                 .profile_name
                 .as_deref()
                 .and_then(|name| store.get_profile(name));
+            let app_session = store.resolve_app_session(globals.profile.as_deref()).ok();
 
             globals.output.print_success(&json!({
                 "object": "auth_state",
@@ -846,6 +892,9 @@ async fn handle_auth(
                 "config_file": store.paths().config_file,
                 "credentials_file": store.paths().credentials_file,
                 "stored_profile": profile,
+                "has_app_token": app_session.is_some(),
+                "app_token_profile": app_session.as_ref().and_then(|session| session.profile_name.as_deref()),
+                "app_token_source": app_session.as_ref().map(|session| session.source),
                 "auth_test": auth,
             }))
         }
@@ -905,14 +954,55 @@ async fn handle_auth_login(
         .profile_name
         .unwrap_or_else(|| derive_profile_name(&meta, store.active_profile()));
     let secret = StoredSecret::Token { token };
+    let app_token = resolve_auth_login_app_token(args.app_token)?;
 
     store.put_profile(profile_name.clone(), meta.clone(), &secret)?;
+    if let Some(app_token) = app_token {
+        client.apps_connections_open_for_token(&app_token).await?;
+        let app_secret = StoredAppSecret::Token { token: app_token };
+        store.put_app_secret(&profile_name, &app_secret)?;
+    }
     globals.output.print_success(&json!({
         "object": "auth_profile",
         "profile_name": profile_name,
         "active_profile": store.active_profile(),
+        "has_app_token": store.has_persisted_app_secret(&profile_name),
         "meta": meta,
         "auth_test": auth,
+    }))
+}
+
+async fn handle_auth_app_login(
+    args: AuthAppLoginArgs,
+    globals: &GlobalOptions,
+    client: &SlackClient,
+    store: &mut ConfigStore,
+) -> Result<()> {
+    let token = match args.token {
+        Some(token) => token.trim().to_string(),
+        None => prompt_for_app_token()?,
+    };
+
+    if token.is_empty() {
+        bail!("provide a Slack app token")
+    }
+
+    let profile_name = args
+        .profile_name
+        .or_else(|| globals.profile.clone())
+        .or_else(|| store.active_profile().map(str::to_string))
+        .ok_or_else(|| anyhow!("no target profile configured; run `slackcli auth login` first or pass --profile-name"))?;
+
+    client.apps_connections_open_for_token(&token).await?;
+
+    let secret = StoredAppSecret::Token { token };
+    store.put_app_secret(&profile_name, &secret)?;
+    globals.output.print_success(&json!({
+        "object": "app_auth_profile",
+        "profile_name": profile_name,
+        "active_profile": store.active_profile(),
+        "session_source": "persisted_profile",
+        "has_app_token": true,
     }))
 }
 
@@ -1334,6 +1424,23 @@ async fn handle_message(
     globals.output.print_success(&response)
 }
 
+async fn handle_listen(
+    args: ListenArgs,
+    globals: &GlobalOptions,
+    client: &SlackClient,
+    store: &ConfigStore,
+) -> Result<()> {
+    let session = resolve_app_session(store, globals, args.app_token)?;
+
+    let options = ListenOptions {
+        output: globals.output,
+        debug_reconnects: args.debug_reconnects,
+        reconnect_delay: Duration::from_secs(args.reconnect_delay_secs),
+    };
+
+    socket_mode::listen(client, session.secret.app_token(), options).await
+}
+
 async fn handle_api(
     args: ApiArgs,
     globals: &GlobalOptions,
@@ -1374,6 +1481,30 @@ async fn handle_api(
 
 fn resolve_session(store: &ConfigStore, globals: &GlobalOptions) -> Result<RuntimeSession> {
     store.resolve_session(globals.profile.as_deref())
+}
+
+fn resolve_app_session(
+    store: &ConfigStore,
+    globals: &GlobalOptions,
+    explicit_token: Option<String>,
+) -> Result<RuntimeAppSession> {
+    match explicit_token {
+        Some(token) => {
+            let token = token.trim().to_string();
+            if token.is_empty() {
+                bail!("provide a Slack app token")
+            }
+            Ok(RuntimeAppSession {
+                profile_name: globals
+                    .profile
+                    .clone()
+                    .or_else(|| store.active_profile().map(str::to_string)),
+                secret: StoredAppSecret::Token { token },
+                source: SessionSource::Environment,
+            })
+        }
+        None => store.resolve_app_session(globals.profile.as_deref()),
+    }
 }
 
 fn push_limit_and_cursor(query: &mut Vec<(String, String)>, pagination: &PaginationArgs) {
@@ -1447,6 +1578,41 @@ fn prompt_for_token() -> Result<String> {
     let token = token.trim().to_string();
     if token.is_empty() {
         bail!("provide a Slack token")
+    }
+    Ok(token)
+}
+
+fn resolve_auth_login_app_token(explicit: Option<String>) -> Result<Option<String>> {
+    if let Some(token) = explicit {
+        let token = token.trim().to_string();
+        if token.is_empty() {
+            bail!("provide a Slack app token")
+        }
+        return Ok(Some(token));
+    }
+
+    if let Ok(token) =
+        std::env::var(SLACK_APP_TOKEN_ENV).or_else(|_| std::env::var(SLACKCLI_APP_TOKEN_ENV))
+    {
+        let token = token.trim().to_string();
+        if !token.is_empty() {
+            return Ok(Some(token));
+        }
+    }
+
+    if io::stdin().is_terminal() {
+        return prompt_for_app_token().map(Some);
+    }
+
+    Ok(None)
+}
+
+fn prompt_for_app_token() -> Result<String> {
+    let token =
+        prompt_password("Paste your Slack app token: ").context("failed to read token input")?;
+    let token = token.trim().to_string();
+    if token.is_empty() {
+        bail!("provide a Slack app token")
     }
     Ok(token)
 }
@@ -1580,6 +1746,7 @@ fn classify_error(error: &anyhow::Error) -> ClassifiedError {
 
     if message.contains("no active profile")
         || message.contains("provide a slack token")
+        || message.contains("provide a slack app token")
         || message.contains("failed to read token input")
     {
         return ClassifiedError {

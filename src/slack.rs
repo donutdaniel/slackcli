@@ -40,6 +40,12 @@ pub struct ExternalUploadTicket {
     pub file_id: String,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AppsConnectionOpen {
+    pub ok: bool,
+    pub url: String,
+}
+
 #[derive(Debug, Clone)]
 pub struct SlackApiError {
     pub status: u16,
@@ -100,6 +106,20 @@ impl SlackClient {
             status: 500,
             code: "decode_error".into(),
             message: format!("failed to decode Slack auth response: {error}"),
+        })
+    }
+
+    pub async fn apps_connections_open_for_token(
+        &self,
+        token: &str,
+    ) -> Result<AppsConnectionOpen, SlackApiError> {
+        let value = self
+            .request_json(token, Method::POST, "apps.connections.open", None, None)
+            .await?;
+        serde_json::from_value(value).map_err(|error| SlackApiError {
+            status: 500,
+            code: "decode_error".into(),
+            message: format!("failed to decode Slack Socket Mode open response: {error}"),
         })
     }
 
@@ -919,6 +939,33 @@ mod tests {
             },
             source: SessionSource::PersistedProfile,
         }
+    }
+
+    #[tokio::test]
+    async fn apps_connections_open_uses_bearer_auth() -> Result<()> {
+        let server = MockServer::start_async().await;
+        let method_mock = server
+            .mock_async(|when, then| {
+                when.method(POST)
+                    .path("/apps.connections.open")
+                    .header("authorization", "Bearer xapp-test-token");
+                then.status(200)
+                    .header("content-type", "application/json")
+                    .json_body(serde_json::json!({
+                        "ok": true,
+                        "url": "wss://wss.slack.com/link/?ticket=abc"
+                    }));
+            })
+            .await;
+
+        let client = SlackClient::new(server.base_url())?;
+        let response = client
+            .apps_connections_open_for_token("xapp-test-token")
+            .await?;
+
+        assert_eq!(response.url, "wss://wss.slack.com/link/?ticket=abc");
+        method_mock.assert_async().await;
+        Ok(())
     }
 
     #[tokio::test]

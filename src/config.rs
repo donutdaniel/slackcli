@@ -14,7 +14,9 @@ use serde::{Deserialize, Serialize};
 pub const APP_NAME: &str = "slackcli";
 pub const LEGACY_APP_NAME: &str = "slack-cli";
 pub const DEFAULT_API_BASE_URL: &str = "https://slack.com/api";
+pub const SLACK_APP_TOKEN_ENV: &str = "SLACK_APP_TOKEN";
 pub const SLACK_API_BASE_URL_ENV: &str = "SLACK_API_BASE_URL";
+pub const SLACKCLI_APP_TOKEN_ENV: &str = "SLACKCLI_APP_TOKEN";
 pub const UNSAFE_LOCAL_API_BASE_URL_ENV: &str = "SLACKCLI_UNSAFE_ALLOW_LOCAL_API_BASE_URL";
 
 #[derive(Debug, Clone)]
@@ -124,6 +126,19 @@ impl StoredSecret {
     }
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum StoredAppSecret {
+    Token { token: String },
+}
+
+impl StoredAppSecret {
+    pub fn app_token(&self) -> &str {
+        let Self::Token { token } = self;
+        token
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SessionSource {
@@ -138,11 +153,22 @@ pub struct RuntimeSession {
     pub source: SessionSource,
 }
 
+#[derive(Debug, Clone)]
+pub struct RuntimeAppSession {
+    pub profile_name: Option<String>,
+    pub secret: StoredAppSecret,
+    pub source: SessionSource,
+}
+
 trait SecretStore: Send + Sync {
     fn write_secret(&self, profile_name: &str, secret: &StoredSecret) -> Result<()>;
     fn read_secret(&self, profile_name: &str) -> Result<StoredSecret>;
     fn delete_secret(&self, profile_name: &str) -> Result<()>;
     fn has_secret(&self, profile_name: &str) -> bool;
+    fn write_app_secret(&self, profile_name: &str, secret: &StoredAppSecret) -> Result<()>;
+    fn read_app_secret(&self, profile_name: &str) -> Result<StoredAppSecret>;
+    fn delete_app_secret(&self, profile_name: &str) -> Result<()>;
+    fn has_app_secret(&self, profile_name: &str) -> bool;
 }
 
 struct FileSecretStore {
@@ -229,17 +255,53 @@ impl SecretStore for FileSecretStore {
             .map(|credentials| credentials.profiles.contains_key(profile_name))
             .unwrap_or(false)
     }
+
+    fn write_app_secret(&self, profile_name: &str, secret: &StoredAppSecret) -> Result<()> {
+        let mut credentials = self.load_credentials()?;
+        credentials
+            .app_profiles
+            .insert(profile_name.to_string(), secret.clone());
+        self.save_credentials(&credentials)
+    }
+
+    fn read_app_secret(&self, profile_name: &str) -> Result<StoredAppSecret> {
+        let credentials = self.load_credentials()?;
+        credentials
+            .app_profiles
+            .get(profile_name)
+            .cloned()
+            .ok_or_else(|| {
+                anyhow!(
+                    "no persisted app token found for profile `{profile_name}`; run `slackcli auth app-login ...` again"
+                )
+            })
+    }
+
+    fn delete_app_secret(&self, profile_name: &str) -> Result<()> {
+        let mut credentials = self.load_credentials()?;
+        credentials.app_profiles.remove(profile_name);
+        self.save_credentials(&credentials)
+    }
+
+    fn has_app_secret(&self, profile_name: &str) -> bool {
+        self.load_credentials()
+            .map(|credentials| credentials.app_profiles.contains_key(profile_name))
+            .unwrap_or(false)
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 struct CredentialsFile {
     #[serde(default)]
     profiles: BTreeMap<String, StoredSecret>,
+    #[serde(default)]
+    app_profiles: BTreeMap<String, StoredAppSecret>,
 }
 
 #[cfg(test)]
 struct InMemorySecretStore {
     secrets: std::sync::Mutex<BTreeMap<String, StoredSecret>>,
+    app_secrets: std::sync::Mutex<BTreeMap<String, StoredAppSecret>>,
 }
 
 #[cfg(test)]
@@ -247,6 +309,7 @@ impl Default for InMemorySecretStore {
     fn default() -> Self {
         Self {
             secrets: std::sync::Mutex::new(BTreeMap::new()),
+            app_secrets: std::sync::Mutex::new(BTreeMap::new()),
         }
     }
 }
@@ -285,6 +348,43 @@ impl SecretStore for InMemorySecretStore {
 
     fn has_secret(&self, profile_name: &str) -> bool {
         self.secrets
+            .lock()
+            .map(|secrets| secrets.contains_key(profile_name))
+            .unwrap_or(false)
+    }
+
+    fn write_app_secret(&self, profile_name: &str, secret: &StoredAppSecret) -> Result<()> {
+        let mut secrets = self
+            .app_secrets
+            .lock()
+            .map_err(|_| anyhow!("in-memory test app secret store is poisoned"))?;
+        secrets.insert(profile_name.to_string(), secret.clone());
+        Ok(())
+    }
+
+    fn read_app_secret(&self, profile_name: &str) -> Result<StoredAppSecret> {
+        let secrets = self
+            .app_secrets
+            .lock()
+            .map_err(|_| anyhow!("in-memory test app secret store is poisoned"))?;
+        secrets.get(profile_name).cloned().ok_or_else(|| {
+            anyhow!(
+                "no persisted app token found for profile `{profile_name}`; run `slackcli auth app-login ...` again"
+            )
+        })
+    }
+
+    fn delete_app_secret(&self, profile_name: &str) -> Result<()> {
+        let mut secrets = self
+            .app_secrets
+            .lock()
+            .map_err(|_| anyhow!("in-memory test app secret store is poisoned"))?;
+        secrets.remove(profile_name);
+        Ok(())
+    }
+
+    fn has_app_secret(&self, profile_name: &str) -> bool {
+        self.app_secrets
             .lock()
             .map(|secrets| secrets.contains_key(profile_name))
             .unwrap_or(false)
@@ -390,6 +490,7 @@ impl ConfigStore {
     pub fn remove_profile(&mut self, name: &str) -> Result<()> {
         self.config.profiles.remove(name);
         self.secret_store.delete_secret(name)?;
+        self.secret_store.delete_app_secret(name)?;
 
         if self.config.active_profile.as_deref() == Some(name) {
             self.config.active_profile = self
@@ -416,6 +517,18 @@ impl ConfigStore {
         self.secret_store.has_secret(name)
     }
 
+    pub fn put_app_secret(&mut self, profile_name: &str, secret: &StoredAppSecret) -> Result<()> {
+        if !self.config.profiles.contains_key(profile_name) {
+            bail!("profile `{profile_name}` does not exist");
+        }
+
+        self.secret_store.write_app_secret(profile_name, secret)
+    }
+
+    pub fn has_persisted_app_secret(&self, name: &str) -> bool {
+        self.secret_store.has_app_secret(name)
+    }
+
     pub fn resolve_session(&self, explicit_profile: Option<&str>) -> Result<RuntimeSession> {
         let profile = explicit_profile
             .map(str::to_string)
@@ -440,6 +553,33 @@ impl ConfigStore {
             source: SessionSource::PersistedProfile,
         })
     }
+
+    pub fn resolve_app_session(&self, explicit_profile: Option<&str>) -> Result<RuntimeAppSession> {
+        let profile = explicit_profile
+            .map(str::to_string)
+            .or_else(|| self.config.active_profile.clone());
+
+        if let Some(token) = runtime_app_token_override() {
+            return Ok(RuntimeAppSession {
+                profile_name: profile,
+                secret: StoredAppSecret::Token { token },
+                source: SessionSource::Environment,
+            });
+        }
+
+        let profile = profile.ok_or_else(|| {
+            anyhow!(
+                "no active profile configured for app token lookup; run `slackcli auth app-login` or set `{SLACK_APP_TOKEN_ENV}`"
+            )
+        })?;
+
+        let secret = self.secret_store.read_app_secret(&profile)?;
+        Ok(RuntimeAppSession {
+            profile_name: Some(profile),
+            secret,
+            source: SessionSource::PersistedProfile,
+        })
+    }
 }
 
 fn project_config_dir(app_name: &str) -> Result<AppPaths> {
@@ -452,6 +592,14 @@ fn runtime_token_override() -> Option<String> {
     env::var("SLACK_TOKEN")
         .ok()
         .or_else(|| env::var("SLACKCLI_TOKEN").ok())
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+}
+
+fn runtime_app_token_override() -> Option<String> {
+    env::var(SLACK_APP_TOKEN_ENV)
+        .ok()
+        .or_else(|| env::var(SLACKCLI_APP_TOKEN_ENV).ok())
         .map(|value| value.trim().to_string())
         .filter(|value| !value.is_empty())
 }
@@ -657,6 +805,12 @@ mod tests {
                 token: "xoxp-test".into(),
             },
         )?;
+        store.put_app_secret(
+            "workspace",
+            &StoredAppSecret::Token {
+                token: "xapp-test".into(),
+            },
+        )?;
 
         let loaded = ConfigStore::with_paths_and_secret_store(
             AppPaths::from_base(temp.path().to_path_buf()),
@@ -664,12 +818,16 @@ mod tests {
         )?;
         let profile = loaded.get_profile("workspace").context("missing profile")?;
         let session = loaded.resolve_session(None)?;
+        let app_session = loaded.resolve_app_session(None)?;
 
         assert_eq!(profile.team_name.as_deref(), Some("Workspace"));
         assert_eq!(loaded.active_profile(), Some("workspace"));
         assert_eq!(session.profile_name.as_deref(), Some("workspace"));
         assert_eq!(session.secret.access_token(), "xoxp-test");
         assert_eq!(session.source, SessionSource::PersistedProfile);
+        assert_eq!(app_session.profile_name.as_deref(), Some("workspace"));
+        assert_eq!(app_session.secret.app_token(), "xapp-test");
+        assert_eq!(app_session.source, SessionSource::PersistedProfile);
 
         Ok(())
     }
@@ -745,11 +903,23 @@ mod tests {
                 token: "xoxp-alpha".into(),
             },
         )?;
+        store.put_app_secret(
+            "alpha",
+            &StoredAppSecret::Token {
+                token: "xapp-alpha".into(),
+            },
+        )?;
         store.put_profile(
             "beta".into(),
             beta,
             &StoredSecret::Token {
                 token: "xoxp-beta".into(),
+            },
+        )?;
+        store.put_app_secret(
+            "beta",
+            &StoredAppSecret::Token {
+                token: "xapp-beta".into(),
             },
         )?;
         store.set_active_profile("alpha")?;
@@ -759,7 +929,9 @@ mod tests {
         assert_eq!(store.active_profile(), Some("beta"));
         assert!(store.get_profile("alpha").is_none());
         assert!(!store.has_persisted_secret("alpha"));
+        assert!(!store.has_persisted_app_secret("alpha"));
         assert!(store.has_persisted_secret("beta"));
+        assert!(store.has_persisted_app_secret("beta"));
 
         let reloaded = ConfigStore::with_paths_and_secret_store(paths, secret_store)?;
         assert_eq!(reloaded.active_profile(), Some("beta"));
@@ -813,6 +985,68 @@ mod tests {
 
         assert_eq!(session.profile_name.as_deref(), Some("beta"));
         assert_eq!(session.secret.access_token(), "xoxp-beta");
+        assert_eq!(session.source, SessionSource::PersistedProfile);
+
+        Ok(())
+    }
+
+    #[test]
+    fn resolve_app_session_prefers_explicit_profile() -> Result<()> {
+        let temp = TempDir::new()?;
+        let paths = AppPaths::from_base(temp.path().to_path_buf());
+        let secret_store: Arc<dyn SecretStore> = Arc::new(InMemorySecretStore::default());
+        let mut store = ConfigStore::with_paths_and_secret_store(paths, secret_store)?;
+
+        store.put_profile(
+            "alpha".into(),
+            ProfileMeta {
+                auth_type: AuthType::User,
+                team_id: Some("T123".into()),
+                team_name: Some("Alpha".into()),
+                enterprise_id: None,
+                url: None,
+                user_id: Some("U123".into()),
+                user_name: Some("alice".into()),
+                bot_id: None,
+            },
+            &StoredSecret::Token {
+                token: "xoxp-alpha".into(),
+            },
+        )?;
+        store.put_profile(
+            "beta".into(),
+            ProfileMeta {
+                auth_type: AuthType::User,
+                team_id: Some("T456".into()),
+                team_name: Some("Beta".into()),
+                enterprise_id: None,
+                url: None,
+                user_id: Some("U456".into()),
+                user_name: Some("bob".into()),
+                bot_id: None,
+            },
+            &StoredSecret::Token {
+                token: "xoxp-beta".into(),
+            },
+        )?;
+        store.put_app_secret(
+            "alpha",
+            &StoredAppSecret::Token {
+                token: "xapp-alpha".into(),
+            },
+        )?;
+        store.put_app_secret(
+            "beta",
+            &StoredAppSecret::Token {
+                token: "xapp-beta".into(),
+            },
+        )?;
+        store.set_active_profile("alpha")?;
+
+        let session = store.resolve_app_session(Some("beta"))?;
+
+        assert_eq!(session.profile_name.as_deref(), Some("beta"));
+        assert_eq!(session.secret.app_token(), "xapp-beta");
         assert_eq!(session.source, SessionSource::PersistedProfile);
 
         Ok(())

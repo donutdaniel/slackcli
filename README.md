@@ -32,6 +32,9 @@ cargo run -- --help
    - Paste [slack-app-manifest.json](./slack-app-manifest.json).
    - Install the app to your workspace.
    - Copy the `User OAuth Token` (`xoxp-...`) from the `OAuth Tokens` section.
+   - The bundled manifest enables Socket Mode by default.
+   - Generate an `App-Level Token` (`xapp-...`) with the `connections:write`
+     scope from `Basic Information`.
    - The manifest is intentionally scoped to the current first-class commands.
    - Corporate workspaces may require admin approval to create or install the app.
 2. Choose an auth mode.
@@ -45,13 +48,27 @@ slackcli auth login
 Persist a profile non-interactively:
 
 ```bash
-slackcli auth login --token "$SLACK_TOKEN"
+slackcli auth login --token "$SLACK_TOKEN" --app-token "$SLACK_APP_TOKEN"
 ```
 
 Use an existing `SLACK_TOKEN` without saving credentials:
 
 ```bash
 env SLACK_TOKEN="$SLACK_TOKEN" slackcli team info
+```
+
+`auth login` will also prompt for the app-level token used by `listen` in
+interactive use. To attach or update the app token later:
+
+```bash
+slackcli auth app-login
+slackcli auth app-login --profile-name work --token "$SLACK_APP_TOKEN"
+```
+
+Use an existing `SLACK_APP_TOKEN` without saving it:
+
+```bash
+env SLACK_APP_TOKEN="$SLACK_APP_TOKEN" slackcli listen --output json
 ```
 
 3. Verify the token and active profile:
@@ -69,6 +86,7 @@ slackcli conversation history '#general' --limit 50
 slackcli conversation open @alice
 slackcli resolve conversation @alice
 slackcli search messages "from:alice deploy failed"
+slackcli listen --output json
 ```
 
 For a personal CLI, a user token is usually the most useful option because it
@@ -106,8 +124,10 @@ Run `slackcli <group> --help` for the full flag surface and more examples.
 
 ```bash
 slackcli auth login
-slackcli auth login --token "$SLACK_TOKEN"
+slackcli auth login --token "$SLACK_TOKEN" --app-token "$SLACK_APP_TOKEN"
 slackcli auth login --profile-name work
+slackcli auth app-login
+slackcli auth app-login --profile-name work --token "$SLACK_APP_TOKEN"
 slackcli auth list
 slackcli auth use work
 slackcli auth logout work
@@ -179,6 +199,20 @@ slackcli api call views.publish --body-json '{"user_id":"U123","view":{"type":"h
 For `GET` requests, repeated `--param key=value` entries become query
 parameters. For `POST` requests, they merge into the JSON object body. Use
 `--body-json`, `--from-file`, or `--stdin` when you need a richer payload.
+
+### listen
+
+`listen` opens a Socket Mode WebSocket connection, acknowledges each envelope,
+and streams the inbound frames to stdout. By default it resolves the app-level
+token from `SLACK_APP_TOKEN` or the saved token attached to the selected
+profile. Socket Mode is part of the default app setup for this project, so
+generate and keep an `xapp-...` token alongside your user token.
+
+```bash
+slackcli listen
+slackcli --profile work listen --output json
+slackcli listen --app-token "$SLACK_APP_TOKEN" --debug-reconnects
+```
 
 ## Output
 
